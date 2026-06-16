@@ -7,10 +7,10 @@ Material for the guest lectures on reinforcement learning for imitation learning
 
 This repository accompanies the exercise session of the lecture:
 
-**Robots that Learn from Imitation and Reinforcement**
+**Robots that Learn from Imitation and Reinforcement:**
 *Reinforcement Learning for Robot Policies in the Era of Imitation Learning*
 
-The tutorial reproduces the main idea of the CoRL 2025 paper:
+The tutorial reproduces the main idea and code of the CoRL 2025 paper (please give credit and cite their work if you find it useful):
 
 > **Steering Your Diffusion Policy with Latent Space Reinforcement Learning (DSRL)**
 > Wagenmaker · Nakamoto · Zhang · Park · Yagoub · Nagabandi · Gupta · Levine
