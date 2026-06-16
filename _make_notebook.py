@@ -133,7 +133,7 @@ md(r"""## 6. Is it *really* better? — quantitative comparison
 A single rollout is noisy. Here we evaluate the **pretrained** policy (Gaussian noise)
 and the **DSRL** policy (deterministic + stochastic) over many full episodes and plot
 the **mean return with 95% confidence intervals**. Non-overlapping bars ⇒ a real,
-statistically clear improvement. This is the one slide to show an audience.""")
+statistically clear improvement.""")
 
 code(r"""N_BAR_EP = int(os.environ.get("DEMO_BAR_EPISODES", 20))
 b_ret, b_len = D.eval_returns_base(base_policy, cfg, n_episodes=N_BAR_EP, max_chunks=EVAL_CHUNKS, seed=2000)
