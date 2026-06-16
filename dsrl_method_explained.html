@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSRL demo — dsrl_demo.py explained</title>
+<style>
+  :root { --bg:#0f1117; --fg:#e6e6e6; --muted:#9aa4b2; --accent:#34c759; --blue:#4aa3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+          color:#1c1e22; background:#f6f7f9; }
+  header { background:linear-gradient(135deg,#10243e,#1b3a5f); color:#fff; padding:38px 24px; }
+  header h1 { margin:0 0 6px; font-size:28px; }
+  header p { margin:0; color:#cfe0f5; }
+  main { max-width:980px; margin:0 auto; padding:24px; }
+  section { margin:34px 0; }
+  h2 { font-size:21px; border-bottom:2px solid #e2e6ea; padding-bottom:6px; }
+  h3 { font-size:16px; margin:0 0 8px; }
+  h3 code { background:#eef2f6; padding:2px 8px; border-radius:6px; color:#0b5; font-weight:700; }
+  .lead { color:#41464d; }
+  .intro { background:#fff; border:1px solid #e2e6ea; border-radius:12px; padding:18px 20px; }
+  .card { background:#fff; border:1px solid #e2e6ea; border-radius:12px; padding:16px 18px; margin:16px 0;
+           box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  pre.code { background:var(--bg); color:var(--fg); padding:14px 16px; border-radius:10px; overflow:auto;
+              font:13px/1.5 "SF Mono",Menlo,Consolas,monospace; }
+  .why { margin-top:12px; background:#f1f8f2; border-left:4px solid var(--accent); padding:10px 14px;
+          border-radius:0 8px 8px 0; font-size:15px; }
+  .why code, .lead code, .intro code, .cap code { background:#eef2f6; padding:1px 5px; border-radius:5px; }
+  .why ul { margin:8px 0 0; padding-left:20px; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.92em; }
+  .diagram { display:flex; flex-wrap:wrap; align-items:center; gap:8px; justify-content:center; margin:18px 0; }
+  .box { background:#eef2f6; border:1px solid #d4dae1; border-radius:10px; padding:10px 12px; text-align:center; font-size:14px; }
+  .box span { color:var(--muted); font-size:11px; }
+  .box.rl { background:#e7f8ec; border-color:#9ad9ad; }
+  .box.frozen { background:#e7f0fb; border-color:#9cc4ef; }
+  .arr { color:#9aa4b2; font-size:20px; }
+  .cap { text-align:center; color:#41464d; font-size:14px; }
+  .takeaways { background:#fff8e6; border:1px solid #f0e0a8; border-radius:12px; padding:8px 20px; }
+  footer { color:#8a929c; font-size:13px; text-align:center; padding:24px; }
+</style></head>
+<body>
+<header>
+  <h1>Steering a Diffusion Policy with RL — <code style="color:#9fe6b5">dsrl_demo.py</code> explained</h1>
+  <p>A function-by-function companion to the hopper demo notebook · for the lecture</p>
+</header>
+<main>
+  <div class="intro">
+<p><b>DSRL</b> (<i>Diffusion Steering via Reinforcement Learning</i>, Wagenmaker et al.,
+CoRL 2025) fine-tunes a diffusion/flow policy <b>without changing its weights</b>.
+A diffusion policy turns an <i>initial noise vector</i> into an action by iterative
+denoising. DSRL freezes that denoiser and trains a small RL agent (SAC-style) whose
+<b>action is the initial noise</b>. Steering the noise steers the behavior.</p>
+<p>This file, <code>dsrl_demo.py</code>, is the thin layer the demo notebook calls into.
+Below, each function is shown with its real code and explained in terms of the method.</p>
+
+<div class="diagram">
+  <div class="box">state&nbsp;s</div><div class="arr">&rarr;</div>
+  <div class="box rl">RL actor<br><span>(learned)</span></div><div class="arr">&rarr;</div>
+  <div class="box">noise&nbsp;z</div><div class="arr">&rarr;</div>
+  <div class="box frozen">diffusion denoiser<br><span>(FROZEN, DDIM)</span></div><div class="arr">&rarr;</div>
+  <div class="box">action&nbsp;chunk</div><div class="arr">&rarr;</div>
+  <div class="box">environment</div>
+</div>
+<p class="cap">DSRL only trains the green box. The blue box (the pretrained diffusion policy)
+never changes. <b>Before</b> fine-tuning we set <code>z ~ N(0, I)</code> (no steering);
+<b>after</b>, the RL actor chooses <code>z</code>.</p>
+</div>
+  <section><h2>0 · Setup &amp; imports</h2><p class="lead">The module fixes the repo paths and rendering backend, then imports the
+        three pillars: the <b>DSRL</b> algorithm (SB3 fork), the <b>diffusion policy</b>
+        loader (DPPO fork, via <code>load_base_policy</code>), and the env
+        <b>wrappers</b>.</p>
+<div class="card">
+
+<pre class="code">BASE = &quot;/workspace/dsrl&quot;
+for _p in (BASE, os.path.join(BASE, &quot;dppo&quot;)):
+    if _p not in sys.path:
+        sys.path.append(_p)
+
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+
+import gym
+import d4rl  # noqa: F401  (registers hopper-medium-v2)
+import d4rl.gym_mujoco  # noqa: F401
+
+from stable_baselines3 import DSRL
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.callbacks import BaseCallback
+
+from env_utils import ObservationWrapperGym, ActionChunkWrapper
+from utils import load_base_policy, collect_rollouts</pre>
+<div class="why"><b>What.</b> <code>MUJOCO_GL=egl</code> enables GPU headless rendering (for the
+        videos); <code>D4RL_SUPPRESS_IMPORT_ERROR</code> silences optional d4rl sub-modules.
+        <code>ObservationWrapperGym</code> / <code>ActionChunkWrapper</code> adapt the gym
+        env; <code>load_base_policy</code> loads the frozen diffusion policy.</div>
+</div>
+</section>
+<section><h2>1 · Configuration</h2><p class="lead">One function turns the project's Hydra YAML into a ready-to-use config
+        (checkpoint paths, env name, network sizes, and the DSRL hyper-parameters).</p>
+<div class="card">
+<h3><code>load_config</code></h3>
+<pre class="code">def load_config(overrides=None):
+    &quot;&quot;&quot;Load the project&#x27;s hopper config without Hydra and apply overrides.&quot;&quot;&quot;
+    OmegaConf.register_new_resolver(&quot;eval&quot;, eval, replace=True)
+    OmegaConf.register_new_resolver(&quot;round_up&quot;, math.ceil, replace=True)
+    OmegaConf.register_new_resolver(&quot;round_down&quot;, math.floor, replace=True)
+    OmegaConf.register_new_resolver(&quot;now&quot;, lambda *a: &quot;demo&quot;, replace=True)
+
+    cfg = OmegaConf.load(os.path.join(BASE, &quot;cfg/gym/dsrl_hopper.yaml&quot;))
+    cfg.use_wandb = False
+    if overrides:
+        cfg.merge_with(OmegaConf.create(overrides))
+    OmegaConf.resolve(cfg)
+
+    # Make the repo-relative (&quot;./dppo/...&quot;) paths absolute so the demo works
+    # regardless of the current working directory.
+    def _abs(p):
+        return p if os.path.isabs(p) else os.path.normpath(os.path.join(BASE, p))
+    cfg.normalization_path = _abs(cfg.normalization_path)
+    cfg.base_policy_path = _abs(cfg.base_policy_path)
+    cfg.model.network_path = _abs(cfg.model.network_path)
+    cfg.dppo_path = _abs(cfg.dppo_path)
+    return cfg</pre>
+<div class="why"><b>What.</b> Loads <code>cfg/gym/dsrl_hopper.yaml</code> without launching Hydra,
+        disables Weights&amp;Biases, applies overrides (e.g. <code>device</code>), and makes the
+        <code>./dppo/...</code> paths absolute so it runs from any folder.
+        <b>Method link.</b> This config carries the two knobs the paper highlights:
+        <code>train.action_magnitude</code> (how far the noise may be pushed) and
+        <code>train.utd</code> (gradient steps per env step), plus the path to the
+        <b>pretrained diffusion checkpoint</b>.</div>
+</div>
+</section>
+<section><h2>2 · Environments</h2><p class="lead">The diffusion policy emits an <b>action chunk</b> (several timesteps at once),
+        and it expects observations normalized the same way as during pretraining.
+        These helpers build exactly that env stack.</p>
+<div class="card">
+<h3><code>_make_chunk_env</code></h3>
+<pre class="code">def _make_chunk_env(cfg):
+    &quot;&quot;&quot;A single training env: normalized obs + action-chunk wrapper (matches train_dsrl).&quot;&quot;&quot;
+    env = gym.make(cfg.env_name)
+    env = ObservationWrapperGym(env, cfg.normalization_path)
+    env = ActionChunkWrapper(env, cfg, max_episode_steps=cfg.env.max_episode_steps)
+    return env</pre>
+<div class="why"><b>What.</b> <code>gym.make(hopper)</code> &rarr; <code>ObservationWrapperGym</code>
+        (normalizes obs to [-1,1] and un-normalizes actions using the pretraining stats) &rarr;
+        <code>ActionChunkWrapper</code> (plays the <code>act_steps</code> actions of a chunk
+        sequentially). <b>Method link.</b> Matching the pretraining normalization is essential —
+        the frozen denoiser only behaves well on inputs it recognizes.</div>
+</div>
+<div class="card">
+<h3><code>make_train_env</code></h3>
+<pre class="code">def make_train_env(cfg):
+    # DummyVecEnv (single process) keeps the demo robust inside a Jupyter kernel —
+    # SubprocVecEnv re-imports __main__ in workers, which breaks in notebooks.
+    return make_vec_env(lambda: _make_chunk_env(cfg), n_envs=cfg.env.n_envs,
+                        vec_env_cls=DummyVecEnv)</pre>
+</div>
+<div class="card">
+<h3><code>make_eval_env</code></h3>
+<pre class="code">&lt;b&gt;What.&lt;/b&gt; Vectorize the env. We use &lt;code&gt;DummyVecEnv&lt;/code&gt; (single process)
+        on purpose: &lt;code&gt;SubprocVecEnv&lt;/code&gt; re-imports &lt;code&gt;__main__&lt;/code&gt; in worker
+        processes, which breaks inside a Jupyter kernel.</pre>
+</div>
+</section>
+<section><h2>3 · The model — this is the core of DSRL</h2><p class="lead"><code>make_model</code> builds the SAC-style agent <b>in the noise space</b> and
+        hands it the frozen diffusion policy. This is where &ldquo;steer the noise&rdquo; becomes code.</p>
+<div class="card">
+<h3><code>make_model</code></h3>
+<pre class="code">def make_model(cfg, env):
+    &quot;&quot;&quot;Build the DSRL (DSRL-NA) algorithm exactly as train_dsrl.py does.&quot;&quot;&quot;
+    post_linear_modules = [torch.nn.LayerNorm] if cfg.train.use_layer_norm else None
+    net_arch = [cfg.train.layer_size] * cfg.train.num_layers
+    policy_kwargs = dict(
+        net_arch=dict(pi=net_arch, qf=net_arch),
+        activation_fn=torch.nn.Tanh,
+        log_std_init=0.0,
+        post_linear_modules=post_linear_modules,
+        n_critics=cfg.train.n_critics,
+    )
+    base_policy = load_base_policy(cfg)
+    model = DSRL(
+        &quot;MlpPolicy&quot;, env,
+        learning_rate=cfg.train.actor_lr,
+        buffer_size=10_000_000,
+        learning_starts=1,
+        batch_size=cfg.train.batch_size,
+        tau=cfg.train.tau,
+        gamma=cfg.train.discount,
+        train_freq=cfg.train.train_freq,
+        gradient_steps=cfg.train.utd,
+        ent_coef=&quot;auto&quot; if cfg.train.ent_coef == -1 else cfg.train.ent_coef,
+        target_update_interval=1,
+        target_entropy=&quot;auto&quot; if cfg.train.target_ent == -1 else cfg.train.target_ent,
+        verbose=0,
+        policy_kwargs=policy_kwargs,
+        diffusion_policy=base_policy,
+        diffusion_act_dim=(cfg.act_steps, cfg.action_dim),
+        noise_critic_grad_steps=cfg.train.noise_critic_grad_steps,
+        critic_backup_combine_type=cfg.train.critic_backup_combine_type,
+    )
+    return model, base_policy</pre>
+<div class="why"><b>What.</b> Builds a <code>DSRL</code> agent (a SAC variant) with a 3-layer MLP
+        actor/critic. <code>load_base_policy(cfg)</code> returns the <b>frozen</b> diffusion
+        policy (DPPO <code>DiffusionEval</code>, DDIM sampling, controllable initial noise).
+        <b>Method link — read these arguments:</b>
+        <ul>
+          <li><code>diffusion_policy=base_policy</code> — the frozen denoiser the agent steers (never trained).</li>
+          <li><code>diffusion_act_dim=(act_steps, action_dim)</code> — the shape of the noise vector = the shape of the action chunk. The actor's action <b>is</b> that noise.</li>
+          <li><code>noise_critic_grad_steps</code> &amp; <code>critic_backup_combine_type</code> — the &ldquo;<b>NA</b>&rdquo; variant (<i>DSRL-NA</i>): an auxiliary critic in the noise space, distilled from a Q-function learned in the original action space (more sample-efficient).</li>
+        </ul>
+        So the actor proposes <code>z</code>; before <code>z</code> reaches the environment it is denoised by the frozen policy into an action chunk.</div>
+</div>
+<div class="card">
+<h3><code>warmup_buffer</code></h3>
+<pre class="code">def warmup_buffer(model, cfg, steps=200):
+    &quot;&quot;&quot;Seed the replay buffer with rollouts of the (un-steered) base diffusion policy.&quot;&quot;&quot;
+    if steps &lt;= 0:
+        return
+    env = make_train_env(cfg)
+    collect_rollouts(model, env, steps, model.diffusion_policy, cfg)
+    env.close()</pre>
+<div class="why"><b>What.</b> Pre-fills the replay buffer with rollouts of the <i>un-steered</i>
+        base policy (<code>collect_rollouts</code>). <b>Method link.</b> A behavior prior — RL
+        starts from sensible coverage instead of pure randomness, speeding up learning.</div>
+</div>
+</section>
+<section><h2>4 · Rollouts &amp; rendering — &ldquo;before vs after&rdquo;</h2><p class="lead">The same episode loop drives both clips; only the <b>action function</b> differs.
+        That single difference <i>is</i> the before/after story.</p>
+<div class="card">
+<h3><code>_render_rollout</code></h3>
+<pre class="code">def _render_rollout(cfg, action_fn, max_chunks=250, seed=0):
+    &quot;&quot;&quot;Step a single rendered hopper env, choosing each action chunk via action_fn(obs).&quot;&quot;&quot;
+    base = gym.make(cfg.env_name)
+    base.seed(seed)
+    env = ObservationWrapperGym(base, cfg.normalization_path)
+    obs = env.reset()
+    frames, total = [], 0.0
+    for _ in range(max_chunks):
+        chunk = action_fn(obs).reshape(cfg.act_steps, cfg.action_dim)
+        done = False
+        for i in range(cfg.act_steps):
+            obs, r, done, _ = env.step(chunk[i])
+            total += float(r)
+            frames.append(base.render(mode=&quot;rgb_array&quot;))
+            if done:
+                break
+        if done:
+            break
+    base.close()
+    return frames, total</pre>
+<div class="why"><b>What.</b> Runs one episode on a rendered env. Each step it calls
+        <code>action_fn(obs)</code> to get an action chunk, plays it, and stores RGB frames.</div>
+</div>
+<div class="card">
+<h3><code>rollout_base_policy</code></h3>
+<pre class="code">def rollout_base_policy(base_policy, cfg, max_chunks=250, seed=0):
+    &quot;&quot;&quot;Behavior of the pretrained diffusion policy with standard Gaussian noise (the &#x27;before&#x27;).&quot;&quot;&quot;
+    dev = cfg.model.device
+
+    def action_fn(obs):
+        noise = torch.randn(1, cfg.act_steps, cfg.action_dim, device=dev)
+        a = base_policy(torch.tensor(obs[None], device=dev, dtype=torch.float32), noise)
+        return np.asarray(a)
+
+    return _render_rollout(cfg, action_fn, max_chunks, seed)</pre>
+<div class="why"><b>BEFORE.</b> <code>action_fn</code> samples <code>z ~ N(0, I)</code> and denoises it:
+        <code>base_policy(obs, noise)</code>. This is a vanilla diffusion policy with noise from
+        the prior — no steering.</div>
+</div>
+<div class="card">
+<h3><code>rollout_dsrl</code></h3>
+<pre class="code">def rollout_dsrl(model, cfg, max_chunks=250, seed=0, deterministic=True):
+    &quot;&quot;&quot;Behavior of the DSRL-fine-tuned (steered-noise) policy (the &#x27;after&#x27;).&quot;&quot;&quot;
+    def action_fn(obs):
+        a, _ = model.predict_diffused(obs[None].astype(np.float32),
+                                      deterministic=deterministic)
+        return np.asarray(a)
+
+    return _render_rollout(cfg, action_fn, max_chunks, seed)</pre>
+<div class="why"><b>AFTER.</b> <code>action_fn</code> calls <code>model.predict_diffused(obs)</code>:
+        the learned actor picks <code>z</code>, then the <b>same frozen</b> denoiser turns it into
+        an action. Same denoiser, smarter noise &rarr; better behavior.</div>
+</div>
+<div class="card">
+<h3><code>show_clip</code></h3>
+<pre class="code">def show_clip(frames, basename, fps=30, caption=None, width=360):
+    &quot;&quot;&quot;Save an mp4 (full res) + a GIF, and DISPLAY the GIF inline as an HTML &lt;img&gt;
+    with a base64 data URI. This representation renders everywhere — JupyterLab,
+    VSCode, and (crucially) the self-contained HTML export used for talks.&quot;&quot;&quot;
+    import base64
+    from IPython.display import HTML, display
+    save_video(frames, f&quot;{basename}.mp4&quot;, fps=fps)
+    gif = save_gif(frames, f&quot;{basename}.gif&quot;)
+    if caption:
+        print(caption)
+    b64 = base64.b64encode(open(gif, &quot;rb&quot;).read()).decode(&quot;ascii&quot;)
+    display(HTML(f&#x27;&lt;img src=&quot;data:image/gif;base64,{b64}&quot; width=&quot;{width}&quot;/&gt;&#x27;))</pre>
+<div class="why"><b>What.</b> Saves a full-res MP4 and a downscaled GIF, then displays the GIF as an
+        HTML <code>&lt;img&gt;</code> data-URI — the one representation that renders in JupyterLab,
+        VSCode, <i>and</i> the self-contained HTML export used in the talk.</div>
+</div>
+</section>
+<section><h2>5 · Measuring the improvement</h2><p class="lead">A single rollout is noisy. These run many episodes (no rendering) and summarize
+        with confidence intervals — the rigorous &ldquo;is it really better?&rdquo;.</p>
+<div class="card">
+<h3><code>eval_returns_base</code></h3>
+<pre class="code">def eval_returns_base(base_policy, cfg, n_episodes=50, max_chunks=300, seed=1000):
+    &quot;&quot;&quot;Returns of the pretrained diffusion policy with standard Gaussian noise.&quot;&quot;&quot;
+    dev = cfg.model.device
+
+    def action_fn(obs):
+        noise = torch.randn(obs.shape[0], cfg.act_steps, cfg.action_dim, device=dev)
+        a = base_policy(torch.tensor(obs, device=dev, dtype=torch.float32), noise)
+        return np.asarray(a).reshape(obs.shape[0], cfg.act_steps * cfg.action_dim)
+
+    return _eval_returns(cfg, action_fn, n_episodes, max_chunks, seed)</pre>
+<div class="why"><b>What.</b> Same idea as the rollouts but headless and over many episodes.
+        <code>eval_returns_base</code> uses <code>N(0,I)</code> noise; <code>eval_returns_dsrl</code>
+        uses the learned actor (deterministic or stochastic).</div>
+</div>
+<div class="card">
+<h3><code>eval_returns_dsrl</code></h3>
+<pre class="code">def eval_returns_dsrl(model, cfg, n_episodes=50, max_chunks=300, seed=1000, deterministic=True):
+    &quot;&quot;&quot;Returns of the DSRL-fine-tuned (steered-noise) policy.&quot;&quot;&quot;
+    def action_fn(obs):
+        a, _ = model.predict_diffused(obs.astype(np.float32), deterministic=deterministic)
+        return np.asarray(a)
+
+    return _eval_returns(cfg, action_fn, n_episodes, max_chunks, seed)</pre>
+</div>
+<div class="card">
+<h3><code>summarize</code></h3>
+<pre class="code">def summarize(name, rets, lens):
+    m, sd = float(rets.mean()), float(rets.std(ddof=1)) if len(rets) &gt; 1 else 0.0
+    sem = sd / np.sqrt(len(rets)) if len(rets) else 0.0
+    return dict(name=name, n=len(rets), mean=m, std=sd, sem=sem,
+                ci95=1.96 * sem, median=float(np.median(rets)),
+                min=float(rets.min()), max=float(rets.max()), mean_len=float(lens.mean()))</pre>
+<div class="why"><b>What.</b> Reduces a list of episode returns to mean, std, <b>95% CI</b>, median and
+        mean length. <b>Method link.</b> Non-overlapping CIs between base and DSRL ⇒ a statistically
+        clear gain (our run: ~+56%).</div>
+</div>
+</section>
+<section><h2>6 · Training-metrics callback</h2><p class="lead">Plugs into <code>model.learn(...)</code> to record what the curves in the notebook show.</p>
+<div class="card">
+<h3><code>DemoCallback</code></h3>
+<pre class="code">class DemoCallback(BaseCallback):
+    &quot;&quot;&quot;Collects training losses and periodic deterministic-eval returns for plotting.&quot;&quot;&quot;
+
+    def __init__(self, cfg, eval_every=2000, n_eval_episodes=5, max_chunks=250):
+        super().__init__()
+        self.cfg = cfg
+        self.eval_every = eval_every
+        self.n_eval_episodes = n_eval_episodes
+        self.max_chunks = max_chunks
+        self.act_chunk = cfg.act_steps
+        self.n_envs = cfg.env.n_envs
+        # logs
+        self.t_loss, self.actor_loss, self.critic_loss, self.noise_critic_loss = [], [], [], []
+        self.ent_coef = []
+        self.t_eval, self.eval_return = [], []
+        self.train_t, self.train_return = [], []
+        self._eval_env = None
+        self._next_eval = 0
+        self._env_steps = 0
+
+    def _env_timesteps(self):
+        # number of underlying (per-action) env steps seen so far
+        return self._env_steps
+
+    def _on_step(self):
+        self._env_steps += self.act_chunk * self.n_envs
+        for info in self.locals[&quot;infos&quot;]:
+            if &quot;episode&quot; in info:
+                self.train_t.append(self._env_steps)
+                self.train_return.append(float(info[&quot;episode&quot;][&quot;r&quot;]))
+        # record losses from the SB3 logger
+        v = self.model.logger.name_to_value
+        if &quot;train/actor_loss&quot; in v:
+            self.t_loss.append(self._env_steps)
+            self.actor_loss.append(v.get(&quot;train/actor_loss&quot;, np.nan))
+            self.critic_loss.append(v.get(&quot;train/critic_loss&quot;, np.nan))
+            self.noise_critic_loss.append(v.get(&quot;train/noise_critic_loss&quot;, np.nan))
+            self.ent_coef.append(v.get(&quot;train/ent_coef&quot;, np.nan))
+        # periodic deterministic eval
+        if self._env_steps &gt;= self._next_eval:
+            self._next_eval = self._env_steps + self.eval_every
+            self.eval_return.append(self._evaluate())
+            self.t_eval.append(self._env_steps)
+            print(f&quot;[eval] env_steps={self._env_steps:&gt;7d}  mean_return={self.eval_return[-1]:8.1f}&quot;)
+        return True
+
+    def _evaluate(self):
+        if self._eval_env is None:
+            self._eval_env = make_eval_env(self.cfg, n_envs=1)
+        env = self._eval_env
+        returns = []
+        for _ in range(self.n_eval_episodes):
+            obs = env.reset()
+            ep_ret, done = 0.0, False
+            for _ in range(self.max_chunks):
+                action, _ = self.model.predict_diffused(obs, deterministic=True)
+                obs, reward, done, _ = env.step(action)
+                ep_ret += float(reward[0])
+                if done[0]:
+                    break
+            returns.append(ep_ret)
+        return float(np.mean(returns))</pre>
+<div class="why"><b>What.</b> On every SB3 step it logs the losses
+        (<code>actor_loss</code>, <code>critic_loss</code>, the DSRL-specific
+        <code>noise_critic_loss</code>, <code>ent_coef</code>) and, every
+        <code>eval_every</code> env-steps, runs a short deterministic evaluation and stores the
+        mean return. <b>Method link.</b> The <b>eval-return curve</b> is the headline metric
+        (task reward rising); the losses show learning <i>dynamics</i>, not performance.</div>
+</div>
+</section>
+  <section><h2>Key takeaways for the audience</h2>
+    <div class="takeaways">
+<ul>
+  <li><b>Frozen denoiser, learned noise.</b> DSRL never updates the diffusion policy — it learns which initial noise to feed it.</li>
+  <li><b>The actor lives in noise space.</b> Its action has the same shape as the action chunk and is denoised before reaching the env (<code>predict_diffused</code>).</li>
+  <li><b>Before = N(0,I); After = learned z.</b> Only <code>action_fn</code> changes between the two clips.</li>
+  <li><b>DSRL-NA</b> adds a noise-space critic distilled from an action-space Q-function for sample efficiency.</li>
+  <li><b>Read it as reward.</b> Judge success by the eval-return curve and the multi-episode bar chart (mean ± 95% CI), not by the loss values.</li>
+</ul>
+</div>
+  </section>
+</main>
+<footer>Generated from dsrl_demo.py · DSRL (Wagenmaker et al., CoRL 2025)</footer>
+</body></html>
